@@ -129,14 +129,16 @@ def generate_suggestion(repo_details: dict) -> str:
                 "role": "system",
                 "content": (
                     "Você é um consultor de software experiente. "
-                    "Analise o repositório abaixo e forneça UMA sugestão concreta e acionável de melhoria. "
-                    "A sugestão deve ser específica, prática e implementável em poucas horas. "
-                    "Considere: qualidade de código, documentação, testes, CI/CD, segurança, performance, "
-                    "boas práticas da linguagem/framework. "
-                    "Responda em português brasileiro, de forma direta e objetiva. "
-                    "NÃO inclua seu raciocínio, análise intermediária ou passos de pensamento. "
-                    "Responda APENAS com o resultado final no formato: "
-                    "um título curto em negrito + 2-3 frases explicando o porquê e como implementar."
+                    "Sua tarefa: analisar um repositório e dar UMA sugestão de melhoria. "
+                    "Requisitos da sugestão: específica, prática, implementável em poucas horas. "
+                    "Áreas: qualidade de código, documentação, testes, CI/CD, segurança, performance. "
+                    "Idioma: português brasileiro. "
+                    "Responda SOMENTE com a sugestão final, sem raciocínio ou análise. "
+                    "Exemplo de resposta ideal:\n"
+                    "**Adicione tratamento de erros nas chamadas HTTP**\n\n"
+                    "As requisições em main.py não tratam exceções de rede, o que causa crashes silenciosos. "
+                    "Envolva as chamadas httpx.get() em try/except e adicione retry com backoff exponencial "
+                    "usando a biblioteca tenacity. Isso melhora a resiliência em ambientes instáveis."
                 ),
             },
             {
@@ -155,19 +157,52 @@ def generate_suggestion(repo_details: dict) -> str:
         content = choice.message.reasoning_content or ""
 
     if not content:
+        raw = response.model_dump()
+        extra = raw.get("choices", [{}])[0].get("message", {})
+        content = extra.get("reasoning_content", "") or extra.get("content", "")
+
+    if not content:
         print(f"Resposta vazia do modelo. Raw: {response.model_dump_json()}")
         return ""
 
-    # Modelos "thinking" despejam raciocinio antes da resposta final.
-    # Extrair o ultimo bloco que comeca com titulo em negrito (**...**) + paragrafo.
-    blocks = re.findall(
-        r"(\*\*[^*]+\*\*[:\s]*\n+(?:[^*\n].+\n?)+)",
-        content,
-    )
-    if blocks:
-        content = blocks[-1].strip()
+    # Modelos "thinking" despejam raciocinio no content.
+    # Estrategia: encontrar o ultimo bloco "**titulo**" seguido de texto limpo.
+    parts = re.split(r"(\*\*[^*]+\*\*)", content)
 
-    return content
+    suggestion = ""
+    for i in range(len(parts) - 1, -1, -1):
+        if parts[i].startswith("**") and parts[i].endswith("**"):
+            title = parts[i]
+            body = parts[i + 1] if i + 1 < len(parts) else ""
+            body = body.strip().lstrip(":").strip()
+
+            # Descartar se corpo comeca com padrao de raciocinio
+            if re.match(r"^(\.|No entanto|Mas |Porém|Contudo|Entretanto|Vamos)", body):
+                continue
+
+            sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", body) if s.strip()]
+            clean = []
+            for s in sentences:
+                if re.match(
+                    r"^(Preciso|Vou |São \d|O usuário|Verificando|Rascunho|"
+                    r"Isso tem|Isso é|Checando|Analis|Pontos de|A sugestão|Outra opção|"
+                    r"Outra:|Formato|Texto:|Título:|Está bom|- )",
+                    s,
+                ):
+                    break
+                clean.append(s)
+
+            if len(clean) >= 2:
+                suggestion = f"{title}\n\n{' '.join(clean[:4])}"
+                break
+
+    return suggestion if suggestion else content.strip()[:500]
+
+
+def _is_valid_suggestion(text: str) -> bool:
+    invalid_patterns = ["título curto", "2-3 frases", "exemplo de resposta", "formato:"]
+    lower = text.lower()
+    return len(text) > 50 and not any(p in lower for p in invalid_patterns)
 
 
 def send_telegram_message(message: str):
@@ -208,6 +243,14 @@ def main():
 
     print("Gerando sugestão com LLM...")
     suggestion = generate_suggestion(details)
+
+    if not _is_valid_suggestion(suggestion):
+        print("Sugestão inválida, tentando novamente...")
+        suggestion = generate_suggestion(details)
+
+    if not _is_valid_suggestion(suggestion):
+        print("Não foi possível gerar uma sugestão válida.")
+        return
 
     message = f"*Palpiteiro* - Sugestão para `{details['name']}`\n\n{suggestion}\n\n_Modelo: {LLM_MODEL}_"
     print(f"\n{message}\n")
