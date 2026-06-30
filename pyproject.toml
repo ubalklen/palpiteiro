@@ -1,0 +1,11 @@
+[project]
+name = "palpiteiro"
+version = "0.1.0"
+description = "Analisa repositórios GitHub e envia sugestões de melhoria via Telegram"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "httpx",
+    "openai",
+    "python-dotenv",
+]
